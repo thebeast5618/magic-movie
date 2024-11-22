@@ -1,12 +1,12 @@
 const NodeCache = require('node-cache');
-const cache = new NodeCache({ stdTTL: 3600 }); // Cache for 1 hour
+const cache = new NodeCache();
 
-async function cacheGet(key) {
+async function getCache(key) {
     return cache.get(key);
 }
 
-async function cacheSet(key, value) {
-    return cache.set(key, value);
+async function setCache(key, value, ttl = 3600) {
+    return cache.set(key, value, ttl);
 }
 
-module.exports = { cacheGet, cacheSet };
+module.exports = { getCache, setCache };
