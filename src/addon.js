@@ -21,14 +21,23 @@ builder.defineStreamHandler(async ({ type, id }) => {
         const imdbId = id.split(':')[0];
         const torrents = await getTorrents(imdbId);
         
-        const streams = torrents.map(torrent => ({
-            name: `💫 ${torrent.name}`,
-            title: `${torrent.size} | S:${torrent.seeds} L:${torrent.leeches}`,
-            infoHash: torrent.magnetLink.match(/btih:([a-zA-Z0-9]+)/i)?.[1]?.toLowerCase(),
-        })).filter(s => s.infoHash);
+        const streams = torrents.map(torrent => {
+            const infoHash = torrent.magnetLink.match(/btih:([a-zA-Z0-9]+)/i)?.[1]?.toLowerCase();
+            if (!infoHash) return null;
+
+            return {
+                name: torrent.name,
+                title: `${torrent.size} | S:${torrent.seeds} L:${torrent.leeches}`,
+                infoHash: infoHash,
+                behaviorHints: {
+                    bingeGroup: `torrent-${infoHash}`
+                }
+            };
+        }).filter(Boolean);
 
         if (config.realDebridKey) {
-            return { streams: await processWithRealDebrid(streams, config.realDebridKey) };
+            const processedStreams = await processWithRealDebrid(streams, config.realDebridKey);
+            return { streams: processedStreams };
         }
 
         return { streams };
