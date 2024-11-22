@@ -56,8 +56,10 @@ app.post('/api/config', (req, res) => {
     }
 });
 
+// Stremio addon routes
 app.use('/', getRouter(addonInterface));
 
+// Error handling
 app.use((err, req, res, next) => {
     console.error(err.stack);
     res.status(500).send('Something broke!');
@@ -66,4 +68,5 @@ app.use((err, req, res, next) => {
 const port = config.port;
 app.listen(port, () => {
     console.log(`Addon active on port ${port}`);
-    console.log(`Configure at: http://localhost:${port}/
+    console.log(`Configure at: http://localhost:${port}/configure`);
+});
