@@ -1,101 +1,60 @@
 const axios = require('axios');
 
-class RealDebrid {
-    constructor(apiKey) {
-        this.apiKey = apiKey;
-        this.baseUrl = 'https://api.real-debrid.com/rest/1.0';
-        this.client = axios.create({
-            baseURL: this.baseUrl,
-            headers: {
-                'Authorization': `Bearer ${this.apiKey}`
-            }
-        });
-    }
-
-    async addMagnet(magnetLink) {
-        try {
-            const { data } = await this.client.post('/torrents/addMagnet', {
-                magnet: magnetLink
-            });
-            return data;
-        } catch (error) {
-            console.error('RealDebrid addMagnet error:', error.message);
-            throw error;
-        }
-    }
-
-    async selectFiles(torrentId) {
-        try {
-            const { data } = await this.client.post(`/torrents/selectFiles/${torrentId}`, {
-                files: 'all'
-            });
-            return data;
-        } catch (error) {
-            console.error('RealDebrid selectFiles error:', error.message);
-            throw error;
-        }
-    }
-
-    async getTorrentInfo(torrentId) {
-        try {
-            const { data } = await this.client.get(`/torrents/info/${torrentId}`);
-            return data;
-        } catch (error) {
-            console.error('RealDebrid getTorrentInfo error:', error.message);
-            throw error;
-        }
-    }
-
-    async getUnrestrictedLink(link) {
-        try {
-            const { data } = await this.client.post('/unrestrict/link', {
-                link: link
-            });
-            return data;
-        } catch (error) {
-            console.error('RealDebrid unrestrict error:', error.message);
-            throw error;
-        }
-    }
-}
-
 async function processWithRealDebrid(streams, apiKey) {
-    const rd = new RealDebrid(apiKey);
-    
-    const processed = await Promise.all(
-        streams.map(async stream => {
+    if (!apiKey) return streams;
+
+    try {
+        const processedStreams = [];
+        
+        for (const stream of streams) {
+            if (!stream.infoHash) continue;
+
             try {
                 // Add magnet to Real-Debrid
-                const torrent = await rd.addMagnet(stream.infoHash);
-                
-                // Select all files
-                await rd.selectFiles(torrent.id);
-                
-                // Wait for torrent info
-                const torrentInfo = await rd.getTorrentInfo(torrent.id);
-                
-                // Get unrestricted link for the largest file
-                if (torrentInfo.links && torrentInfo.links.length > 0) {
-                    const unrestrictedData = await rd.getUnrestrictedLink(torrentInfo.links[0]);
-                    
-                    return {
+                const addMagnetResponse = await axios.post('https://api.real-debrid.com/rest/1.0/torrents/addMagnet', {
+                    magnet: `magnet:?xt=urn:btih:${stream.infoHash}`,
+                }, {
+                    headers: { Authorization: `Bearer ${apiKey}` }
+                });
+
+                // Select files
+                const torrentId = addMagnetResponse.data.id;
+                await axios.post(`https://api.real-debrid.com/rest/1.0/torrents/selectFiles/${torrentId}`, {
+                    files: "all"
+                }, {
+                    headers: { Authorization: `Bearer ${apiKey}` }
+                });
+
+                // Get links
+                const linksResponse = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, {
+                    headers: { Authorization: `Bearer ${apiKey}` }
+                });
+
+                if (linksResponse.data.links && linksResponse.data.links.length > 0) {
+                    // Unrestrict link
+                    const unrestrictResponse = await axios.post('https://api.real-debrid.com/rest/1.0/unrestrict/link', {
+                        link: linksResponse.data.links[0]
+                    }, {
+                        headers: { Authorization: `Bearer ${apiKey}` }
+                    });
+
+                    processedStreams.push({
                         ...stream,
-                        url: unrestrictedData.download,
-                        behavioral: {
-                            autoPlay: true,
-                            autoSkip: false
-                        }
-                    };
+                        url: unrestrictResponse.data.download,
+                        title: `🌟 RD | ${stream.title}`
+                    });
                 }
-                return stream;
             } catch (error) {
-                console.error('Processing stream error:', error.message);
-                return stream;
+                console.error(`Error processing stream with Real-Debrid: ${error.message}`);
+                processedStreams.push(stream);
             }
-        })
-    );
-    
-    return processed.filter(stream => stream.url);
+        }
+
+        return processedStreams;
+    } catch (error) {
+        console.error('Real-Debrid processing error:', error);
+        return streams;
+    }
 }
 
 module.exports = { processWithRealDebrid };
