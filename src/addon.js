@@ -69,12 +69,17 @@ function isSeasonPack(name, season) {
         `${season}complete`,
         `season.${season}.complete`,
         `s${s}complete`,
-        // Add specific patterns for common season pack formats
         `s${s}e00`,
         `${season}x00`
     ];
 
-    return patterns.some(pattern => normalizedName.includes(pattern));
+    // Check if it's a season pack but NOT a specific episode
+    if (patterns.some(pattern => normalizedName.includes(pattern))) {
+        // Make sure it's not a specific episode
+        const episodePattern = new RegExp(`s${s}e[0-9]{2}|${season}x[0-9]{2}|episode[. ]?[0-9]{1,2}`, 'i');
+        return !episodePattern.test(normalizedName);
+    }
+    return false;
 }
 
 function isValidVideoFile(filename) {
@@ -92,17 +97,12 @@ function findEpisodeFile(files, season, episode) {
     const sortedFiles = [...files].sort((a, b) => b.size - a.size);
     
     const patterns = [
-        // Common episode naming patterns
         new RegExp(`[/\\\\]?s${s}e${e}[^/\\\\]*$`, 'i'),
         new RegExp(`[/\\\\]?${s}x${e}[^/\\\\]*$`, 'i'),
         new RegExp(`[/\\\\]?e${e}[^/\\\\]*$`, 'i'),
         new RegExp(`episode[. ]?${episode}[^/\\\\]*$`, 'i'),
         new RegExp(`ep[. ]?${episode}[^/\\\\]*$`, 'i'),
-        // Number-based patterns
-        new RegExp(`[/\\\\]?${episode}[^/\\\\]*$`, 'i'),
-        // Include broader patterns as fallback
-        new RegExp(`s${s}.*e${e}`, 'i'),
-        new RegExp(`${s}x${e}`, 'i')
+        new RegExp(`[/\\\\]?${episode}[^/\\\\]*$`, 'i')
     ];
 
     // First try exact episode match
@@ -116,16 +116,11 @@ function findEpisodeFile(files, season, episode) {
         }
     }
 
-    // Fallback: Try to find a file with the episode number in its name
-    const episodeNumber = parseInt(episode);
-    for (const file of sortedFiles) {
-        if (!isValidVideoFile(file.path)) continue;
-        
-        // Look for the episode number in the filename
-        const filename = file.path.split(/[/\\]/).pop();
-        if (filename && filename.includes(episodeNumber.toString())) {
-            return file;
-        }
+    // If no exact match found and we have the correct number of video files,
+    // try to use position-based matching
+    const videoFiles = sortedFiles.filter(file => isValidVideoFile(file.path));
+    if (videoFiles.length >= episode) {
+        return videoFiles[episode - 1];
     }
 
     return null;
@@ -146,7 +141,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
 
         // Filter out unwanted torrents
         torrents = torrents.filter(torrent => {
-            if (torrent.seeds < config.filters.minSeeds) return false;
+            if (!torrent.seeds || torrent.seeds < config.filters.minSeeds) return false;
             
             const name = torrent.name.toLowerCase();
             if (config.filters.excludeX265 && name.includes('x265')) return false;
@@ -154,13 +149,13 @@ builder.defineStreamHandler(async ({ type, id }) => {
             if (config.filters.excludeH265 && name.includes('h265')) return false;
             
             const sizeGB = torrent.size / (1024 * 1024 * 1024);
-            if (sizeGB > config.filters.maxSize) return false;
+            if (sizeGB < config.filters.minSize || sizeGB > config.filters.maxSize) return false;
 
             return true;
         });
 
         if (type === 'series' && season) {
-            // Prioritize season packs for TV shows
+            // For TV shows, try season packs first
             const seasonTorrents = torrents.filter(t => isSeasonPack(t.name, season));
             console.log(`Found ${seasonTorrents.length} season pack torrents`);
             
@@ -173,8 +168,9 @@ builder.defineStreamHandler(async ({ type, id }) => {
         torrents = sortTorrents(torrents);
         console.log(`Processing ${torrents.length} sorted torrents`);
 
-        // Try to process torrents until we find a valid stream
-        for (const torrent of torrents.slice(0, 5)) { // Try top 5 torrents
+        const streams = [];
+        // Process top 5 torrents
+        for (const torrent of torrents.slice(0, 5)) {
             console.log(`Processing torrent: ${torrent.name}`);
             
             const stream = {
@@ -183,26 +179,28 @@ builder.defineStreamHandler(async ({ type, id }) => {
             };
 
             try {
-                const debridStream = await processWithRealDebrid(stream, config.realDebridKey);
+                const debridStream = await processWithRealDebrid(stream, config.realDebridKey, {
+                    type,
+                    season: parseInt(season),
+                    episode: parseInt(episode)
+                });
                 
-                if (debridStream && debridStream.fileList && type === 'series' && season && episode) {
-                    const episodeFile = findEpisodeFile(debridStream.fileList, season, episode);
-                    
-                    if (episodeFile) {
-                        console.log(`Found matching episode file: ${episodeFile.path}`);
-                        return {
-                            streams: [{
-                                name: `${torrent.name} - ${episodeFile.path.split(/[/\\]/).pop()}`,
+                if (debridStream) {
+                    if (type === 'series' && season && episode) {
+                        const episodeFile = findEpisodeFile(debridStream.fileList, season, episode);
+                        if (episodeFile) {
+                            streams.push({
+                                name: `🌟 RD | ${episodeFile.path.split(/[/\\]/).pop()}`,
                                 url: episodeFile.url,
-                                title: `${debridStream.name} - Episode ${episode}`,
+                                title: `S${season}E${episode} | ${(episodeFile.size / (1024 * 1024 * 1024)).toFixed(2)} GB`,
                                 behaviorHints: {
-                                    bingeGroup: `${imdbId}-${season}`,
+                                    bingeGroup: `RD-${imdbId}-S${season}`,
                                 }
-                            }]
-                        };
+                            });
+                        }
+                    } else {
+                        streams.push(debridStream);
                     }
-                } else if (debridStream) {
-                    return { streams: [debridStream] };
                 }
             } catch (error) {
                 console.error(`Error processing torrent ${torrent.name}:`, error);
@@ -210,8 +208,8 @@ builder.defineStreamHandler(async ({ type, id }) => {
             }
         }
 
-        console.log('No valid streams found');
-        return { streams: [] };
+        console.log(`Found ${streams.length} valid streams`);
+        return { streams };
 
     } catch (error) {
         console.error('Stream handler error:', error);
