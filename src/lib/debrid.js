@@ -40,57 +40,79 @@ function findEpisodeFile(files, season, episode) {
     const s = season.toString().padStart(2, '0');
     const e = episode.toString().padStart(2, '0');
     
-    // Sort files by size (largest first) to prefer higher quality versions
     const videoFiles = files
         .filter(file => isVideoFile(file.path))
         .sort((a, b) => b.bytes - a.bytes);
 
-    // Normalize paths for matching
     const normalizedFiles = videoFiles.map(file => ({
         ...file,
-        normalizedPath: file.path.toLowerCase()
+        normalizedPath: file.path.toLowerCase(),
+        parts: file.path.toLowerCase().split(/[/\\]/)
     }));
 
-    // First try exact episode match with strict patterns
+    // More comprehensive patterns for episode matching
     const strictPatterns = [
-        `s${s}e${e}`,
-        `${s}x${e}`,
-        `season.${season}.episode.${episode}`,
-        `season ${season} episode ${episode}`,
-        `e${e}`,
+        `s${s}e${e}\\b`,
+        `${s}x${e}\\b`,
+        `season.?${season}.?episode.?${episode}\\b`,
+        `season.?${season}.?ep.?${episode}\\b`,
+        `^${e}\\b`,
+        `.e${e}\\b`
     ];
 
-    for (const file of normalizedFiles) {
-        const filename = file.normalizedPath;
-        if (strictPatterns.some(pattern => filename.includes(pattern))) {
-            console.log(`Found exact match for S${s}E${e}: ${file.path}`);
-            return file;
+    // Special handling for episode 1 to avoid confusion with 10,11,etc
+    if (episode === '01') {
+        const exclusionPatterns = [`e10`, `e11`, `e12`, `e13`, `e14`, `e15`, `e16`, `e17`, `e18`, `e19`];
+        
+        for (const file of normalizedFiles) {
+            const hasPattern = strictPatterns.some(pattern => 
+                new RegExp(pattern, 'i').test(file.normalizedPath)
+            );
+            const hasExclusion = exclusionPatterns.some(pattern => 
+                file.normalizedPath.includes(pattern)
+            );
+            
+            if (hasPattern && !hasExclusion) {
+                console.log(`Found exact match for S${s}E${e}: ${file.path}`);
+                return file;
+            }
+        }
+    } else {
+        // Regular episode matching
+        for (const file of normalizedFiles) {
+            if (strictPatterns.some(pattern => new RegExp(pattern, 'i').test(file.normalizedPath))) {
+                console.log(`Found exact match for S${s}E${e}: ${file.path}`);
+                return file;
+            }
         }
     }
 
-    // Try to find numerically ordered files
-    const seasonPattern = new RegExp(`season[ .]?${season}|s${s}`, 'i');
-    const seasonFiles = normalizedFiles.filter(file => seasonPattern.test(file.normalizedPath));
+    // Try to find season folder structure
+    const seasonFolderFiles = normalizedFiles.filter(file => {
+        return file.parts.some(part => 
+            part.match(new RegExp(`^season.?${season}$|^s${s}$`, 'i'))
+        );
+    });
 
-    if (seasonFiles.length > 0) {
-        // Try to extract episode numbers from filenames
-        const episodeFiles = seasonFiles.map(file => {
-            const filename = file.path.split(/[/\\]/).pop().toLowerCase();
+    if (seasonFolderFiles.length > 0) {
+        // Try to extract episode numbers
+        const episodeFiles = seasonFolderFiles.map(file => {
+            const filename = file.parts[file.parts.length - 1];
             let episodeNum = null;
 
-            // Try various patterns to extract episode number
+            // Enhanced episode number detection
             const patterns = [
-                new RegExp(`e(\\d{1,2})`, 'i'),
-                new RegExp(`ep(\\d{1,2})`, 'i'),
-                new RegExp(`episode[. ](\\d{1,2})`, 'i'),
-                new RegExp(`\\b(\\d{1,2})\\b`),
+                new RegExp(`e(\\d{1,2})\\b`, 'i'),
+                new RegExp(`ep(\\d{1,2})\\b`, 'i'),
+                new RegExp(`episode[. ](\\d{1,2})\\b`, 'i'),
+                new RegExp(`^(\\d{1,2})\\b`),
             ];
 
             for (const pattern of patterns) {
                 const match = filename.match(pattern);
                 if (match) {
                     const num = parseInt(match[1]);
-                    if (num > 0 && num <= 100) { // Reasonable episode number range
+                    if (num > 0 && num <= 100) {
                         episodeNum = num;
                         break;
                     }
@@ -103,23 +125,46 @@ function findEpisodeFile(files, season, episode) {
             };
         });
 
-        // Sort by episode number
+        // Sort by episode number and find match
         const sortedEpisodes = episodeFiles
             .filter(file => file.episodeNum !== null)
             .sort((a, b) => a.episodeNum - b.episodeNum);
 
-        // Find the matching episode
         const matchingEpisode = sortedEpisodes.find(file => file.episodeNum === parseInt(episode));
         if (matchingEpisode) {
             console.log(`Found episode by number matching for S${s}E${e}: ${matchingEpisode.path}`);
             return matchingEpisode;
         }
 
-        // If we have the correct number of files, assume they're in order
+        // If we have enough episodes and they seem to be in order
         if (sortedEpisodes.length >= parseInt(episode)) {
             const orderedEpisode = sortedEpisodes[parseInt(episode) - 1];
-            console.log(`Found episode by position for S${s}E${e}: ${orderedEpisode.path}`);
-            return orderedEpisode;
+            if (orderedEpisode) {
+                console.log(`Found episode by position for S${s}E${e}: ${orderedEpisode.path}`);
+                return orderedEpisode;
+            }
+        }
+    }
+
+    // Last resort: try to find by simple numbering in a season folder
+    const seasonFiles = normalizedFiles.filter(file => {
+        const hasSeasonIndicator = file.normalizedPath.includes(`season${season}`) || 
+                                 file.normalizedPath.includes(`s${s}`);
+        const notOtherSeason = !file.normalizedPath.match(new RegExp(`season(?!${season}\\b)\\d+|s(?!${s}\\b)\\d{2}`, 'i'));
+        return hasSeasonIndicator && notOtherSeason;
+    });
+
+    if (seasonFiles.length > 0) {
+        const sortedByName = seasonFiles.sort((a, b) => {
+            const aName = a.path.split(/[/\\]/).pop();
+            const bName = b.path.split(/[/\\]/).pop();
+            return aName.localeCompare(bName, undefined, {numeric: true});
+        });
+
+        if (sortedByName.length >= parseInt(episode)) {
+            const potentialEpisode = sortedByName[parseInt(episode) - 1];
+            console.log(`Found episode by folder position for S${s}E${e}: ${potentialEpisode.path}`);
+            return potentialEpisode;
         }
     }
 
@@ -153,17 +198,18 @@ async function processWithRealDebrid(stream, apiKey, options = {}) {
 
         const torrentId = addTorrentResponse.data.id;
 
-        // Step 2: Get torrent info
+        // Step 2: Get torrent info and wait for availability
         let torrentInfo;
         let attempts = 0;
-        const maxAttempts = 5;
+        const maxAttempts = 10;
 
         while (attempts < maxAttempts) {
             torrentInfo = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, {
                 headers: { 'Authorization': `Bearer ${apiKey}` }
             });
 
-            if (torrentInfo.data.status === 'waiting_files_selection') {
+            if (torrentInfo.data.status === 'waiting_files_selection' || 
+                torrentInfo.data.status === 'downloaded') {
                 break;
             }
 
@@ -173,6 +219,12 @@ async function processWithRealDebrid(stream, apiKey, options = {}) {
 
         if (!torrentInfo?.data?.files?.length) {
             throw new Error('No files found in torrent');
+        }
+
+        // For season packs, wait a bit longer to ensure all files are processed
+        if (type === 'series' && torrentInfo.data.files.length > 5) {
+            console.log('Large file count detected, waiting for full processing...');
+            await new Promise(resolve => setTimeout(resolve, 5000));
         }
 
         // Step 3: Select files
@@ -185,16 +237,15 @@ async function processWithRealDebrid(stream, apiKey, options = {}) {
                 selectedFiles = [episodeFile];
                 console.log(`Selected episode file: ${episodeFile.path}`);
             }
-        }
-
-        if (selectedFiles.length === 0) {
-            const largestVideo = files
+        } else {
+            // For movies or fallback: select largest video file
+            const videoFiles = files
                 .filter(file => isVideoFile(file.path))
-                .sort((a, b) => b.bytes - a.bytes)[0];
+                .sort((a, b) => b.bytes - a.bytes);
             
-            if (largestVideo) {
-                selectedFiles = [largestVideo];
-                console.log(`Selected largest video file: ${largestVideo.path}`);
+            if (videoFiles.length > 0) {
+                selectedFiles = [videoFiles[0]];
+                console.log(`Selected largest video file: ${videoFiles[0].path}`);
             }
         }
 
@@ -202,7 +253,7 @@ async function processWithRealDebrid(stream, apiKey, options = {}) {
             throw new Error('No suitable video files found');
         }
 
-        // Select files
+        // Select files on Real-Debrid
         const fileIds = selectedFiles.map(file => file.id).join(',');
         await axios.post(`https://api.real-debrid.com/rest/1.0/torrents/selectFiles/${torrentId}`, 
             `files=${fileIds}`,
@@ -218,7 +269,7 @@ async function processWithRealDebrid(stream, apiKey, options = {}) {
         let downloadLinks = [];
         attempts = 0;
 
-        while (attempts < 10) {
+        while (attempts < maxAttempts) {
             const statusResponse = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, {
                 headers: { 'Authorization': `Bearer ${apiKey}` }
             });
@@ -239,7 +290,8 @@ async function processWithRealDebrid(stream, apiKey, options = {}) {
                 const linkResponses = await Promise.all(linkPromises);
                 downloadLinks = linkResponses.map(response => ({
                     url: response.data.download,
-                    filename: response.data.filename
+                    filename: response.data.filename,
+                    filesize: response.data.filesize
                 }));
                 break;
             }
@@ -248,30 +300,31 @@ async function processWithRealDebrid(stream, apiKey, options = {}) {
             await new Promise(resolve => setTimeout(resolve, 2000));
         }
 
-        if (downloadLinks.length > 0) {
-            const selectedFile = selectedFiles[0];
-            const fileSize = selectedFile.bytes ? `${(selectedFile.bytes / (1024 * 1024 * 1024)).toFixed(2)} GB` : '';
-            const qualityScore = getQualityInfo(stream.name);
-            
-            return {
-                name: `🌟 RD | ${selectedFile.path.split(/[/\\]/).pop()}`,
-                title: `${fileSize} | Real-Debrid`,
-                url: downloadLinks[0].url,
-                behaviorHints: {
-                    bingeGroup: type === 'series' ? `RD-${stream.infoHash}-S${season}` : `RD-${stream.infoHash}`,
-                    notWebReady: false
-                },
-                qualityScore: qualityScore,
-                size: selectedFile.bytes,
-                fileList: files.map((file, index) => ({
-                    path: file.path,
-                    url: downloadLinks[index]?.url || null,
-                    size: file.bytes
-                }))
-            };
+        if (downloadLinks.length === 0) {
+            throw new Error('No download links generated');
         }
 
-        return null;
+        // Create stream object
+        const selectedFile = selectedFiles[0];
+        const fileSize = selectedFile.bytes ? `${(selectedFile.bytes / (1024 * 1024 * 1024)).toFixed(2)} GB` : '';
+        const qualityScore = getQualityInfo(stream.name);
+
+        return {
+            name: `🌟 RD | ${selectedFile.path.split(/[/\\]/).pop()}`,
+            title: `${fileSize} | Real-Debrid`,
+            url: downloadLinks[0].url,
+            behaviorHints: {
+                bingeGroup: type === 'series' ? `RD-${stream.infoHash}-S${season}` : `RD-${stream.infoHash}`,
+                notWebReady: false
+            },
+            qualityScore: qualityScore,
+            size: selectedFile.bytes,
+            fileList: files.map((file, index) => ({
+                path: file.path,
+                url: downloadLinks[index]?.url || null,
+                size: file.bytes
+            }))
+        };
 
     } catch (error) {
         console.error('Real-Debrid processing error:', error.message);
