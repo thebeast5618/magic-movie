@@ -57,31 +57,42 @@ builder.defineStreamHandler(async ({ type, id }) => {
         
         // Filter and sort torrents
         torrents = sortTorrents(
-            torrents.filter(torrent => torrent.seeds > 0)
+            torrents.filter(torrent => {
+                // Apply filters
+                if (torrent.seeds < config.filters.minSeeds) return false;
+                
+                const name = torrent.name.toLowerCase();
+                if (config.filters.excludeX265 && name.includes('x265')) return false;
+                if (config.filters.excludeHEVC && name.includes('hevc')) return false;
+                if (config.filters.excludeH265 && name.includes('h265')) return false;
+                
+                // Convert size to GB and check
+                const sizeGB = parseFloat(torrent.size);
+                if (sizeGB > config.filters.maxSize) return false;
+                
+                return true;
+            })
         );
 
-        // If single link mode is enabled, only keep the best torrent
-        if (config.singleLinkMode) {
-            torrents = [torrents[0]];
-        } else {
-            torrents = torrents.slice(0, 15); // Limit to top 15 best torrents
-        }
+        // Get only the best quality torrent
+        const bestTorrent = torrents[0];
+        if (!bestTorrent) return { streams: [] };
 
-        const streams = torrents.map(torrent => {
-            const infoHash = torrent.magnetLink.match(/btih:([a-zA-Z0-9]+)/i)?.[1]?.toLowerCase();
-            if (!infoHash) return null;
+        const infoHash = bestTorrent.magnetLink.match(/btih:([a-zA-Z0-9]+)/i)?.[1]?.toLowerCase();
+        if (!infoHash) return { streams: [] };
 
-            return {
-                name: torrent.name,
-                title: `💾 ${torrent.size} | 🌱 ${torrent.seeds}`,
-                infoHash: infoHash,
-                behaviorHints: {
-                    bingeGroup: `torrent-${infoHash}`
-                }
-            };
-        }).filter(Boolean);
+        // Process with Real-Debrid
+        const stream = {
+            name: bestTorrent.name,
+            infoHash: infoHash
+        };
 
-        return { streams };
+        const debridStream = await processWithRealDebrid(stream, config.realDebridKey);
+        
+        return { 
+            streams: debridStream ? [debridStream] : []
+        };
+
     } catch (error) {
         console.error('Stream handler error:', error);
         return { streams: [] };
