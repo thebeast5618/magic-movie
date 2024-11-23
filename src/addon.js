@@ -45,6 +45,21 @@ function sortTorrents(torrents) {
     });
 }
 
+function isMatchingEpisode(torrentName, season, episode) {
+    const s = season.toString().padStart(2, '0');
+    const e = episode.toString().padStart(2, '0');
+    
+    const patterns = [
+        `s${s}e${e}`,
+        `s${s}ep${e}`,
+        `${s}x${e}`,
+        `season ${season}.*episode ${episode}`
+    ];
+    
+    const normalizedName = torrentName.toLowerCase();
+    return patterns.some(pattern => normalizedName.includes(pattern));
+}
+
 builder.defineStreamHandler(async ({ type, id }) => {
     try {
         if (!config.realDebridKey) {
@@ -52,7 +67,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
             return { streams: [] };
         }
 
-        const imdbId = id.split(':')[0];
+        const [imdbId, season, episode] = id.split(':');
         let torrents = await getTorrents(imdbId);
         
         // Filter and sort torrents
@@ -69,6 +84,11 @@ builder.defineStreamHandler(async ({ type, id }) => {
                 // Convert size to GB and check
                 const sizeGB = parseFloat(torrent.size);
                 if (sizeGB > config.filters.maxSize) return false;
+
+                // For TV shows, check if it's the correct episode
+                if (type === 'series' && season && episode) {
+                    return isMatchingEpisode(name, parseInt(season), parseInt(episode));
+                }
                 
                 return true;
             })
