@@ -3,6 +3,7 @@ require('dotenv').config();
 const config = {
     port: process.env.PORT || 3000,
     realDebridKey: process.env.REALDEBRID_KEY || '',
+    singleLinkMode: false,
     cacheTime: 3600,
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
     filters: {
