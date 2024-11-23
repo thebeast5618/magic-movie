@@ -16,24 +16,35 @@ const manifest = {
 
 const builder = new addonBuilder(manifest);
 
+function getQualityScore(name) {
+    const normalizedName = name.toUpperCase();
+    let score = 0;
+    
+    // Resolution scoring
+    if (normalizedName.includes('2160P') || normalizedName.includes('4K')) score += 100;
+    if (normalizedName.includes('1080P')) score += 80;
+    if (normalizedName.includes('720P')) score += 60;
+    
+    // Quality indicators
+    if (normalizedName.includes('REMUX')) score += 50;
+    if (normalizedName.includes('BLURAY')) score += 40;
+    if (normalizedName.includes('HDR')) score += 30;
+    if (normalizedName.includes('WEB-DL')) score += 25;
+    if (normalizedName.includes('WEBRIP')) score += 20;
+    if (normalizedName.includes('HEVC') || normalizedName.includes('X265')) score += 15;
+    if (normalizedName.includes('10BIT')) score += 10;
+    
+    // Negative indicators
+    if (normalizedName.includes('CAM')) score -= 50;
+    if (normalizedName.includes('HDTS')) score -= 40;
+    if (normalizedName.includes('HDTC')) score -= 30;
+    if (normalizedName.includes('SCREENER')) score -= 20;
+    
+    return score;
+}
+
 function sortTorrents(torrents) {
     return torrents.sort((a, b) => {
-        const getQualityScore = (name) => {
-            const normalizedName = name.toUpperCase();
-            let score = 0;
-            
-            if (normalizedName.includes('2160P') || normalizedName.includes('4K')) score += 100;
-            if (normalizedName.includes('1080P')) score += 80;
-            if (normalizedName.includes('720P')) score += 60;
-            if (normalizedName.includes('HDR')) score += 10;
-            if (normalizedName.includes('REMUX')) score += 15;
-            if (normalizedName.includes('BLURAY')) score += 12;
-            if (normalizedName.includes('WEB-DL')) score += 8;
-            if (normalizedName.includes('HEVC') || normalizedName.includes('X265')) score += 5;
-            
-            return score;
-        };
-
         const qualityScoreA = getQualityScore(a.name);
         const qualityScoreB = getQualityScore(b.name);
 
@@ -41,6 +52,7 @@ function sortTorrents(torrents) {
             return qualityScoreB - qualityScoreA;
         }
 
+        // If quality scores are equal, prefer higher seeds
         return b.seeds - a.seeds;
     });
 }
@@ -53,7 +65,10 @@ function isMatchingEpisode(torrentName, season, episode) {
         `s${s}e${e}`,
         `s${s}ep${e}`,
         `${s}x${e}`,
-        `season ${season}.*episode ${episode}`
+        `season ${season}.*episode ${episode}`,
+        `season.${season}.*episode.${episode}`,
+        `s${s}.?e${e}`,
+        `${season}x${e}`
     ];
     
     const normalizedName = torrentName.toLowerCase();
@@ -68,25 +83,59 @@ function isMatchingSeason(torrentName, season) {
         `season ${season}`,
         `s${s}`,
         `season.${season}`,
-        `complete.season.${season}`
+        `complete.season.${season}`,
+        `season${season}`,
+        `${season}complete`,
+        `s${s}complete`
     ];
     
     return patterns.some(pattern => normalizedName.includes(pattern));
 }
 
-function getEpisodeFileName(fileList, season, episode) {
+function isCompleteSeries(torrentName) {
+    const patterns = [
+        'complete series',
+        'complete collection',
+        'all seasons',
+        'full series',
+        'season 1.*season',  // Indicates multiple seasons
+        's01.*s02'          // Indicates multiple seasons
+    ];
+    
+    const normalizedName = torrentName.toLowerCase();
+    return patterns.some(pattern => normalizedName.includes(pattern));
+}
+
+function getEpisodePattern(season, episode) {
     const s = season.toString().padStart(2, '0');
     const e = episode.toString().padStart(2, '0');
     
-    const patterns = [
-        new RegExp(`s${s}e${e}`, 'i'),
-        new RegExp(`${s}x${e}`, 'i'),
-        new RegExp(`episode[. ]${episode}`, 'i')
+    return [
+        new RegExp(`[/\\\\]s${s}e${e}[^/\\\\]*$`, 'i'),
+        new RegExp(`[/\\\\]${s}x${e}[^/\\\\]*$`, 'i'),
+        new RegExp(`episode[. ]?${episode}[^/\\\\]*$`, 'i'),
+        new RegExp(`e${e}[^/\\\\]*$`, 'i'),
+        new RegExp(`s${s}e${e}`, 'i')
     ];
+}
 
-    return fileList.find(file => {
-        const fileName = file.path.toLowerCase();
-        return patterns.some(pattern => pattern.test(fileName));
+function filterTorrents(torrents, type, season, episode) {
+    return torrents.filter(torrent => {
+        // Basic quality filters
+        if (torrent.seeds < config.filters.minSeeds) return false;
+        
+        const name = torrent.name.toLowerCase();
+        if (config.filters.excludeX265 && name.includes('x265')) return false;
+        if (config.filters.excludeHEVC && name.includes('hevc')) return false;
+        if (config.filters.excludeH265 && name.includes('h265')) return false;
+        
+        const sizeGB = torrent.size / (1024 * 1024 * 1024);
+        if (sizeGB > config.filters.maxSize) return false;
+
+        // Skip obvious fake/spam torrents
+        if (name.includes('password') || name.includes('signup')) return false;
+
+        return true;
     });
 }
 
@@ -99,73 +148,55 @@ builder.defineStreamHandler(async ({ type, id }) => {
 
         const [imdbId, season, episode] = id.split(':');
         let torrents = await getTorrents(imdbId);
+        console.log(`Found ${torrents.length} initial torrents for ${imdbId}`);
+
+        // Apply basic filters
+        torrents = filterTorrents(torrents, type, season, episode);
         
-        // First try specific episodes
-        let filteredTorrents = sortTorrents(
-            torrents.filter(torrent => {
-                // Apply filters
-                if (torrent.seeds < config.filters.minSeeds) return false;
-                
-                const name = torrent.name.toLowerCase();
-                if (config.filters.excludeX265 && name.includes('x265')) return false;
-                if (config.filters.excludeHEVC && name.includes('hevc')) return false;
-                if (config.filters.excludeH265 && name.includes('h265')) return false;
-                
-                // Convert size to GB and check
-                const sizeGB = parseFloat(torrent.size);
-                if (sizeGB > config.filters.maxSize) return false;
+        if (type === 'series' && season && episode) {
+            // Try to find exact episode matches first
+            let matchingTorrents = torrents.filter(t => isMatchingEpisode(t.name, season, episode));
+            console.log(`Found ${matchingTorrents.length} exact episode matches`);
 
-                // For TV shows, check if it's the correct episode
-                if (type === 'series' && season && episode) {
-                    return isMatchingEpisode(name, parseInt(season), parseInt(episode));
-                }
-                
-                return true;
-            })
-        );
+            // If no episode matches, look for season packs
+            if (matchingTorrents.length === 0) {
+                matchingTorrents = torrents.filter(t => isMatchingSeason(t.name, season));
+                console.log(`Found ${matchingTorrents.length} season pack matches`);
+            }
 
-        // If no episodes found, try season packs
-        if (type === 'series' && filteredTorrents.length === 0 && season) {
-            filteredTorrents = sortTorrents(
-                torrents.filter(torrent => {
-                    const name = torrent.name.toLowerCase();
-                    if (torrent.seeds < config.filters.minSeeds) return false;
-                    if (config.filters.excludeX265 && name.includes('x265')) return false;
-                    if (config.filters.excludeHEVC && name.includes('hevc')) return false;
-                    if (config.filters.excludeH265 && name.includes('h265')) return false;
-                    
-                    const sizeGB = parseFloat(torrent.size);
-                    if (sizeGB > config.filters.maxSize) return false;
+            // If still nothing, look for complete series
+            if (matchingTorrents.length === 0) {
+                matchingTorrents = torrents.filter(t => isCompleteSeries(t.name));
+                console.log(`Found ${matchingTorrents.length} complete series matches`);
+            }
 
-                    return isMatchingSeason(name, parseInt(season));
-                })
-            );
+            torrents = matchingTorrents;
         }
 
-        // Get only the best quality torrent
-        const bestTorrent = filteredTorrents[0];
-        if (!bestTorrent) return { streams: [] };
+        // Sort and get the best quality torrent
+        torrents = sortTorrents(torrents);
+        const bestTorrent = torrents[0];
+        
+        if (!bestTorrent) {
+            console.log('No suitable torrents found');
+            return { streams: [] };
+        }
 
-        const infoHash = bestTorrent.magnetLink.match(/btih:([a-zA-Z0-9]+)/i)?.[1]?.toLowerCase();
-        if (!infoHash) return { streams: [] };
-
+        console.log(`Selected torrent: ${bestTorrent.name}`);
+        
         // Process with Real-Debrid
         const stream = {
             name: bestTorrent.name,
-            infoHash: infoHash
+            infoHash: bestTorrent.infoHash || bestTorrent.magnetLink.match(/btih:([a-zA-Z0-9]+)/i)?.[1]?.toLowerCase()
         };
 
-        const debridStream = await processWithRealDebrid(stream, config.realDebridKey);
+        const debridStream = await processWithRealDebrid(stream, config.realDebridKey, {
+            type,
+            season: parseInt(season),
+            episode: parseInt(episode),
+            patterns: season && episode ? getEpisodePattern(season, episode) : null
+        });
 
-        // Handle season pack file selection
-        if (type === 'series' && season && episode && debridStream && debridStream.fileList) {
-            const episodeFile = getEpisodeFileName(debridStream.fileList, season, episode);
-            if (episodeFile) {
-                debridStream.url = episodeFile.url;
-                debridStream.name = episodeFile.path;
-            }
-        }
-        
         return { 
             streams: debridStream ? [debridStream] : []
         };
