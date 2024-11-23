@@ -20,23 +20,22 @@ function getQualityScore(name) {
     const normalizedName = name.toUpperCase();
     let score = 0;
     
-    // Resolution scoring
-    if (normalizedName.includes('2160P') || normalizedName.includes('4K')) score += 100;
-    if (normalizedName.includes('1080P')) score += 80;
-    if (normalizedName.includes('720P')) score += 60;
+    // Resolution scoring (higher priority)
+    if (normalizedName.includes('2160P') || normalizedName.includes('4K')) score += 1000;
+    if (normalizedName.includes('1080P')) score += 800;
+    if (normalizedName.includes('720P')) score += 600;
     
     // Source quality
     if (normalizedName.includes('BLURAY')) score += 40;
+    if (normalizedName.includes('REMUX')) score += 50;
     if (normalizedName.includes('WEB-DL')) score += 35;
     if (normalizedName.includes('WEBDL')) score += 35;
     if (normalizedName.includes('WEB')) score += 30;
     if (normalizedName.includes('HDTV')) score += 20;
     
     // Encoding quality
-    if (normalizedName.includes('REMUX')) score += 50;
-    if (normalizedName.includes('X264')) score += 20;
-    if (normalizedName.includes('H264')) score += 20;
     if (normalizedName.includes('X265') || normalizedName.includes('HEVC')) score += 25;
+    if (normalizedName.includes('X264') || normalizedName.includes('H264')) score += 20;
     
     return score;
 }
@@ -59,19 +58,59 @@ function isSeasonPack(name, season) {
     const normalizedName = name.toLowerCase();
     const s = season.toString().padStart(2, '0');
     
+    // More specific patterns first
     const patterns = [
-        `season ${season}`,
-        `season.${season}`,
-        `s${s}`,
-        `season${season}`,
         `complete.season.${season}`,
         `season.${season}.complete`,
-        `s${s}complete`,
-        `s${s}e00`,
-        `${season}x00`
+        `s${s}.complete`,
+        `season ${season} complete`,
+        `complete season ${season}`,
+        `season.${season}`,
+        `season ${season}`,
+        `s${s}`,
     ];
 
-    return patterns.some(pattern => normalizedName.includes(pattern.toLowerCase()));
+    // Check for season pack indicators
+    const isPack = patterns.some(pattern => normalizedName.includes(pattern.toLowerCase()));
+    if (!isPack) return false;
+
+    // Make sure it's not just a single episode
+    const episodePattern = new RegExp(`s${s}e([0-9]{2})|${season}x([0-9]{2})|episode.?([0-9]{1,2})`, 'i');
+    const match = normalizedName.match(episodePattern);
+    
+    // If there's an episode number, make sure it's not episode 1-10
+    if (match) {
+        const epNum = parseInt(match[1] || match[2] || match[3]);
+        return epNum === 0; // Only true for S01E00 style season packs
+    }
+
+    return true;
+}
+
+function isValidEpisodeFile(filename, season, episode) {
+    const s = season.toString().padStart(2, '0');
+    const e = episode.toString().padStart(2, '0');
+    const name = filename.toLowerCase();
+
+    // Exclude sample files and non-video files
+    if (name.includes('sample') || !name.match(/\.(mp4|mkv|avi|m4v|mov)$/i)) {
+        return false;
+    }
+
+    // Specific episode patterns
+    const patterns = [
+        new RegExp(`s${s}e${e}\\b`, 'i'),
+        new RegExp(`${s}x${e}\\b`, 'i'),
+        new RegExp(`season.?${season}.?episode.?${episode}\\b`, 'i'),
+        new RegExp(`e${e}\\b`, 'i'),
+    ];
+
+    // Special handling for episode numbers to avoid confusion between 1 and 10
+    if (episode === 1) {
+        return patterns.some(p => p.test(name)) && !name.includes(`e10`);
+    }
+
+    return patterns.some(p => p.test(name));
 }
 
 builder.defineStreamHandler(async ({ type, id }) => {
@@ -102,24 +141,22 @@ builder.defineStreamHandler(async ({ type, id }) => {
             return true;
         });
 
-        // Handle TV shows differently from movies
+        // Sort all torrents by quality first
+        torrents = sortTorrents(torrents);
+
         if (type === 'series' && season) {
-            // For TV shows, prioritize season packs
-            const seasonTorrents = torrents.filter(t => isSeasonPack(t.name, season));
-            console.log(`Found ${seasonTorrents.length} season pack torrents`);
+            // Split torrents into season packs and regular episodes
+            const seasonPacks = torrents.filter(t => isSeasonPack(t.name, season));
+            const episodeTorrents = torrents.filter(t => !isSeasonPack(t.name, season));
             
-            if (seasonTorrents.length > 0) {
-                torrents = seasonTorrents;
-            }
+            console.log(`Found ${seasonPacks.length} season packs and ${episodeTorrents.length} episode torrents`);
+            
+            // Try season packs first, then individual episodes
+            torrents = [...seasonPacks, ...episodeTorrents];
         }
 
-        // Sort torrents by quality
-        torrents = sortTorrents(torrents);
-        console.log(`Processing ${torrents.length} sorted torrents`);
-
-        // For movies, only process the best quality torrent
-        // For TV shows, try multiple season packs until we find a working episode
-        const torrentLimit = type === 'movie' ? 1 : 3;
+        // Try more torrents for series than movies
+        const torrentLimit = type === 'movie' ? 3 : 10;
 
         for (const torrent of torrents.slice(0, torrentLimit)) {
             console.log(`Processing torrent: ${torrent.name}`);
@@ -130,17 +167,32 @@ builder.defineStreamHandler(async ({ type, id }) => {
             };
 
             try {
-                const debridStream = await processWithRealDebrid(stream, config.realDebridKey, {
-                    type,
-                    season: parseInt(season),
-                    episode: parseInt(episode)
-                });
+                const debridStream = await processWithRealDebrid(stream, config.realDebridKey);
                 
                 if (debridStream) {
                     if (type === 'movie') {
                         return { streams: [debridStream] };
-                    } else if (debridStream.url) {
-                        return { streams: [debridStream] };
+                    } else if (type === 'series' && season && episode) {
+                        // For series, verify we have the correct episode
+                        if (debridStream.fileList) {
+                            const episodeFiles = debridStream.fileList.filter(file => 
+                                isValidEpisodeFile(file.path, season, episode)
+                            ).sort((a, b) => b.size - a.size); // Sort by size descending
+
+                            if (episodeFiles.length > 0) {
+                                const selectedFile = episodeFiles[0];
+                                return {
+                                    streams: [{
+                                        name: `🎬 ${torrent.name}`,
+                                        url: selectedFile.url,
+                                        title: `S${season}E${episode} | ${(selectedFile.size / (1024 * 1024 * 1024)).toFixed(2)} GB`,
+                                        behaviorHints: {
+                                            bingeGroup: `${imdbId}-${season}`
+                                        }
+                                    }]
+                                };
+                            }
+                        }
                     }
                 }
             } catch (error) {
