@@ -87,32 +87,6 @@ function isSeasonPack(name, season) {
     return true;
 }
 
-function isValidEpisodeFile(filename, season, episode) {
-    const s = season.toString().padStart(2, '0');
-    const e = episode.toString().padStart(2, '0');
-    const name = filename.toLowerCase();
-
-    // Exclude sample files and non-video files
-    if (name.includes('sample') || !name.match(/\.(mp4|mkv|avi|m4v|mov)$/i)) {
-        return false;
-    }
-
-    // Specific episode patterns
-    const patterns = [
-        new RegExp(`s${s}e${e}\\b`, 'i'),
-        new RegExp(`${s}x${e}\\b`, 'i'),
-        new RegExp(`season.?${season}.?episode.?${episode}\\b`, 'i'),
-        new RegExp(`e${e}\\b`, 'i'),
-    ];
-
-    // Special handling for episode numbers to avoid confusion between 1 and 10
-    if (episode === 1) {
-        return patterns.some(p => p.test(name)) && !name.includes(`e10`);
-    }
-
-    return patterns.some(p => p.test(name));
-}
-
 builder.defineStreamHandler(async ({ type, id }) => {
     try {
         console.log(`Processing request for ${type} - ${id}`);
@@ -123,7 +97,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
         }
 
         const [imdbId, season, episode] = id.split(':');
-        let torrents = await getTorrents(imdbId);
+        let torrents = await getTorrents(imdbId, type, season);
         console.log(`Found ${torrents.length} initial torrents for ${imdbId}`);
 
         // Filter out unwanted torrents
@@ -151,48 +125,42 @@ builder.defineStreamHandler(async ({ type, id }) => {
             
             console.log(`Found ${seasonPacks.length} season packs and ${episodeTorrents.length} episode torrents`);
             
-            // Try season packs first, then individual episodes
-            torrents = [...seasonPacks, ...episodeTorrents];
+            // Prioritize season packs but keep some episode torrents as backup
+            const topSeasonPacks = seasonPacks.slice(0, 3);
+            const topEpisodeTorrents = episodeTorrents.slice(0, 7);
+            torrents = [...topSeasonPacks, ...topEpisodeTorrents];
         }
 
-        // Try more torrents for series than movies
-        const torrentLimit = type === 'movie' ? 3 : 10;
+        const streams = [];
+        const processedHashes = new Set();
 
-        for (const torrent of torrents.slice(0, torrentLimit)) {
+        for (const torrent of torrents) {
+            if (processedHashes.has(torrent.infoHash)) continue;
+            processedHashes.add(torrent.infoHash);
+
             console.log(`Processing torrent: ${torrent.name}`);
             
-            const stream = {
-                name: torrent.name,
-                infoHash: torrent.infoHash || torrent.magnetLink.match(/btih:([a-zA-Z0-9]+)/i)?.[1]?.toLowerCase()
-            };
-
             try {
-                const debridStream = await processWithRealDebrid(stream, config.realDebridKey);
+                const debridStream = await processWithRealDebrid(
+                    {
+                        name: torrent.name,
+                        infoHash: torrent.infoHash || torrent.magnetLink.match(/btih:([a-zA-Z0-9]+)/i)?.[1]?.toLowerCase()
+                    },
+                    config.realDebridKey,
+                    { type, season, episode }
+                );
                 
                 if (debridStream) {
-                    if (type === 'movie') {
-                        return { streams: [debridStream] };
-                    } else if (type === 'series' && season && episode) {
-                        // For series, verify we have the correct episode
-                        if (debridStream.fileList) {
-                            const episodeFiles = debridStream.fileList.filter(file => 
-                                isValidEpisodeFile(file.path, season, episode)
-                            ).sort((a, b) => b.size - a.size); // Sort by size descending
-
-                            if (episodeFiles.length > 0) {
-                                const selectedFile = episodeFiles[0];
-                                return {
-                                    streams: [{
-                                        name: `🎬 ${torrent.name}`,
-                                        url: selectedFile.url,
-                                        title: `S${season}E${episode} | ${(selectedFile.size / (1024 * 1024 * 1024)).toFixed(2)} GB`,
-                                        behaviorHints: {
-                                            bingeGroup: `${imdbId}-${season}`
-                                        }
-                                    }]
-                                };
-                            }
-                        }
+                    streams.push(debridStream);
+                    
+                    // For movies, one good stream is enough
+                    if (type === 'movie' && debridStream.qualityScore > 3) {
+                        break;
+                    }
+                    
+                    // For series, get a few options but don't overdo it
+                    if (type === 'series' && streams.length >= 3) {
+                        break;
                     }
                 }
             } catch (error) {
@@ -201,8 +169,10 @@ builder.defineStreamHandler(async ({ type, id }) => {
             }
         }
 
-        console.log('No valid streams found');
-        return { streams: [] };
+        // Sort streams by quality score
+        streams.sort((a, b) => b.qualityScore - a.qualityScore);
+
+        return { streams };
 
     } catch (error) {
         console.error('Stream handler error:', error);
