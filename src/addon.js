@@ -64,66 +64,14 @@ function isSeasonPack(name, season) {
         `season.${season}`,
         `s${s}`,
         `season${season}`,
-        `season ${season} complete`,
-        `complete season ${season}`,
-        `${season}complete`,
+        `complete.season.${season}`,
         `season.${season}.complete`,
         `s${s}complete`,
         `s${s}e00`,
         `${season}x00`
     ];
 
-    // Check if it's a season pack but NOT a specific episode
-    if (patterns.some(pattern => normalizedName.includes(pattern))) {
-        // Make sure it's not a specific episode
-        const episodePattern = new RegExp(`s${s}e[0-9]{2}|${season}x[0-9]{2}|episode[. ]?[0-9]{1,2}`, 'i');
-        return !episodePattern.test(normalizedName);
-    }
-    return false;
-}
-
-function isValidVideoFile(filename) {
-    const videoExtensions = ['.mp4', '.mkv', '.avi', '.m4v', '.mov'];
-    const lowercaseFilename = filename.toLowerCase();
-    return videoExtensions.some(ext => lowercaseFilename.endsWith(ext)) &&
-           !lowercaseFilename.includes('sample');
-}
-
-function findEpisodeFile(files, season, episode) {
-    const s = season.toString().padStart(2, '0');
-    const e = episode.toString().padStart(2, '0');
-    
-    // Sort files by size (largest first) to prefer higher quality versions
-    const sortedFiles = [...files].sort((a, b) => b.size - a.size);
-    
-    const patterns = [
-        new RegExp(`[/\\\\]?s${s}e${e}[^/\\\\]*$`, 'i'),
-        new RegExp(`[/\\\\]?${s}x${e}[^/\\\\]*$`, 'i'),
-        new RegExp(`[/\\\\]?e${e}[^/\\\\]*$`, 'i'),
-        new RegExp(`episode[. ]?${episode}[^/\\\\]*$`, 'i'),
-        new RegExp(`ep[. ]?${episode}[^/\\\\]*$`, 'i'),
-        new RegExp(`[/\\\\]?${episode}[^/\\\\]*$`, 'i')
-    ];
-
-    // First try exact episode match
-    for (const file of sortedFiles) {
-        if (!isValidVideoFile(file.path)) continue;
-        
-        for (const pattern of patterns) {
-            if (pattern.test(file.path)) {
-                return file;
-            }
-        }
-    }
-
-    // If no exact match found and we have the correct number of video files,
-    // try to use position-based matching
-    const videoFiles = sortedFiles.filter(file => isValidVideoFile(file.path));
-    if (videoFiles.length >= episode) {
-        return videoFiles[episode - 1];
-    }
-
-    return null;
+    return patterns.some(pattern => normalizedName.includes(pattern.toLowerCase()));
 }
 
 builder.defineStreamHandler(async ({ type, id }) => {
@@ -154,8 +102,9 @@ builder.defineStreamHandler(async ({ type, id }) => {
             return true;
         });
 
+        // Handle TV shows differently from movies
         if (type === 'series' && season) {
-            // For TV shows, try season packs first
+            // For TV shows, prioritize season packs
             const seasonTorrents = torrents.filter(t => isSeasonPack(t.name, season));
             console.log(`Found ${seasonTorrents.length} season pack torrents`);
             
@@ -168,9 +117,11 @@ builder.defineStreamHandler(async ({ type, id }) => {
         torrents = sortTorrents(torrents);
         console.log(`Processing ${torrents.length} sorted torrents`);
 
-        const streams = [];
-        // Process top 5 torrents
-        for (const torrent of torrents.slice(0, 5)) {
+        // For movies, only process the best quality torrent
+        // For TV shows, try multiple season packs until we find a working episode
+        const torrentLimit = type === 'movie' ? 1 : 3;
+
+        for (const torrent of torrents.slice(0, torrentLimit)) {
             console.log(`Processing torrent: ${torrent.name}`);
             
             const stream = {
@@ -186,20 +137,10 @@ builder.defineStreamHandler(async ({ type, id }) => {
                 });
                 
                 if (debridStream) {
-                    if (type === 'series' && season && episode) {
-                        const episodeFile = findEpisodeFile(debridStream.fileList, season, episode);
-                        if (episodeFile) {
-                            streams.push({
-                                name: `🌟 RD | ${episodeFile.path.split(/[/\\]/).pop()}`,
-                                url: episodeFile.url,
-                                title: `S${season}E${episode} | ${(episodeFile.size / (1024 * 1024 * 1024)).toFixed(2)} GB`,
-                                behaviorHints: {
-                                    bingeGroup: `RD-${imdbId}-S${season}`,
-                                }
-                            });
-                        }
-                    } else {
-                        streams.push(debridStream);
+                    if (type === 'movie') {
+                        return { streams: [debridStream] };
+                    } else if (debridStream.url) {
+                        return { streams: [debridStream] };
                     }
                 }
             } catch (error) {
@@ -208,8 +149,8 @@ builder.defineStreamHandler(async ({ type, id }) => {
             }
         }
 
-        console.log(`Found ${streams.length} valid streams`);
-        return { streams };
+        console.log('No valid streams found');
+        return { streams: [] };
 
     } catch (error) {
         console.error('Stream handler error:', error);
