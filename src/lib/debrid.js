@@ -1,6 +1,5 @@
 const axios = require('axios');
 
-// Helper function to extract quality and resolution info
 function getQualityInfo(name) {
     const quality = {
         '2160p': 4,
@@ -33,13 +32,54 @@ function getQualityInfo(name) {
     return score;
 }
 
-async function processWithRealDebrid(stream, apiKey) {
+function isVideoFile(filename) {
+    return /\.(mp4|mkv|avi|mov|m4v|wmv|flv|webm)$/i.test(filename);
+}
+
+function findEpisodeFile(files, season, episode) {
+    const s = season.toString().padStart(2, '0');
+    const e = episode.toString().padStart(2, '0');
+    
+    const patterns = [
+        new RegExp(`s${s}e${e}`, 'i'),
+        new RegExp(`${s}x${e}`, 'i'),
+        new RegExp(`season[. ]?${season}[. ]?episode[. ]?${episode}`, 'i'),
+        new RegExp(`e${e}`, 'i'),
+        new RegExp(`episode[. ]?${episode}`, 'i'),
+        new RegExp(`[/\\\\]${episode}[. ][^/\\\\]*$`, 'i')
+    ];
+
+    // Filter video files and sort by size (largest first)
+    const videoFiles = files
+        .filter(file => isVideoFile(file.path))
+        .sort((a, b) => b.bytes - a.bytes);
+
+    // First try exact episode match
+    for (const file of videoFiles) {
+        for (const pattern of patterns) {
+            if (pattern.test(file.path)) {
+                return file;
+            }
+        }
+    }
+
+    // If no exact match found and files are numbered sequentially, try position-based matching
+    if (videoFiles.length === episode) {
+        return videoFiles[episode - 1];
+    }
+
+    return null;
+}
+
+async function processWithRealDebrid(stream, apiKey, options = {}) {
     if (!apiKey || !stream.infoHash) return null;
 
+    const { type, season, episode } = options;
+    
     try {
         const magnet = `magnet:?xt=urn:btih:${stream.infoHash}&dn=${encodeURIComponent(stream.name)}`;
 
-        // Step 1: Add magnet to Real-Debrid
+        // Step 1: Add magnet
         const addTorrentResponse = await axios.post('https://api.real-debrid.com/rest/1.0/torrents/addMagnet', 
             `magnet=${encodeURIComponent(magnet)}`,
             { 
@@ -56,10 +96,10 @@ async function processWithRealDebrid(stream, apiKey) {
 
         const torrentId = addTorrentResponse.data.id;
 
-        // Step 2: Get torrent info and wait for availability
+        // Step 2: Get torrent info
         let torrentInfo;
         let attempts = 0;
-        const maxAttempts = 3;
+        const maxAttempts = 5;
 
         while (attempts < maxAttempts) {
             torrentInfo = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, {
@@ -71,33 +111,41 @@ async function processWithRealDebrid(stream, apiKey) {
             }
 
             attempts++;
-            await new Promise(resolve => setTimeout(resolve, 1000));
+            await new Promise(resolve => setTimeout(resolve, 2000));
         }
 
         if (!torrentInfo?.data?.files?.length) {
             throw new Error('No files found in torrent');
         }
 
-        // Step 3: Select the largest video file
+        // Step 3: Select files
         const files = torrentInfo.data.files;
-        let maxFileId = null;
-        let maxSize = 0;
-        let selectedFile = null;
+        let selectedFiles = [];
 
-        files.forEach(file => {
-            const isVideo = /\.(mp4|mkv|avi|mov|wmv|flv|webm)$/i.test(file.path);
-            if (isVideo && file.bytes > maxSize) {
-                maxSize = file.bytes;
-                maxFileId = file.id;
-                selectedFile = file;
+        if (type === 'series' && season && episode) {
+            // For TV series, try to find the specific episode
+            const episodeFile = findEpisodeFile(files, season, episode);
+            if (episodeFile) {
+                selectedFiles = [episodeFile];
             }
-        });
+        }
 
-        if (!maxFileId) maxFileId = '1';
+        // If no specific episode found or not a TV series, select the largest video file
+        if (selectedFiles.length === 0) {
+            selectedFiles = files
+                .filter(file => isVideoFile(file.path))
+                .sort((a, b) => b.bytes - a.bytes)
+                .slice(0, 1);
+        }
 
-        // Step 4: Select files
+        if (selectedFiles.length === 0) {
+            throw new Error('No suitable video files found');
+        }
+
+        // Select files
+        const fileIds = selectedFiles.map(file => file.id).join(',');
         await axios.post(`https://api.real-debrid.com/rest/1.0/torrents/selectFiles/${torrentId}`, 
-            `files=${maxFileId}`,
+            `files=${fileIds}`,
             { 
                 headers: { 
                     'Authorization': `Bearer ${apiKey}`,
@@ -106,18 +154,16 @@ async function processWithRealDebrid(stream, apiKey) {
             }
         );
 
-        // Step 5: Wait for the torrent to be processed
-        let downloadLink = null;
-        let fileLinks = [];
+        // Step 4: Wait for processing and get links
+        let downloadLinks = [];
         attempts = 0;
 
-        while (!downloadLink && attempts < 10) {
+        while (attempts < 10) {
             const statusResponse = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, {
                 headers: { 'Authorization': `Bearer ${apiKey}` }
             });
 
             if (statusResponse.data.links?.length > 0) {
-                // Get all file links
                 const linkPromises = statusResponse.data.links.map(link =>
                     axios.post('https://api.real-debrid.com/rest/1.0/unrestrict/link',
                         `link=${link}`,
@@ -131,13 +177,10 @@ async function processWithRealDebrid(stream, apiKey) {
                 );
 
                 const linkResponses = await Promise.all(linkPromises);
-                fileLinks = linkResponses.map(response => ({
-                    download: response.data.download,
+                downloadLinks = linkResponses.map(response => ({
+                    url: response.data.download,
                     filename: response.data.filename
                 }));
-
-                // Set the main download link to the largest file
-                downloadLink = fileLinks[0].download;
                 break;
             }
 
@@ -145,24 +188,24 @@ async function processWithRealDebrid(stream, apiKey) {
             await new Promise(resolve => setTimeout(resolve, 2000));
         }
 
-        if (downloadLink) {
-            const fileSize = maxSize ? `${(maxSize / (1024 * 1024 * 1024)).toFixed(2)} GB` : '';
+        if (downloadLinks.length > 0) {
+            const selectedFile = selectedFiles[0];
+            const fileSize = selectedFile.bytes ? `${(selectedFile.bytes / (1024 * 1024 * 1024)).toFixed(2)} GB` : '';
             const qualityScore = getQualityInfo(stream.name);
             
             return {
-                name: `🌟 RD | ${stream.name}`,
+                name: `🌟 RD | ${selectedFile.path.split(/[/\\]/).pop()}`,
                 title: `${fileSize} | Real-Debrid`,
-                url: downloadLink,
+                url: downloadLinks[0].url,
                 behaviorHints: {
-                    bingeGroup: `RD-${stream.infoHash}`,
+                    bingeGroup: type === 'series' ? `RD-${stream.infoHash}-S${season}` : `RD-${stream.infoHash}`,
                     notWebReady: false
                 },
                 qualityScore: qualityScore,
-                size: maxSize,
-                // Add file list information for season packs
+                size: selectedFile.bytes,
                 fileList: files.map((file, index) => ({
                     path: file.path,
-                    url: fileLinks[index]?.download || null,
+                    url: downloadLinks[index]?.url || null,
                     size: file.bytes
                 }))
             };
@@ -172,12 +215,6 @@ async function processWithRealDebrid(stream, apiKey) {
 
     } catch (error) {
         console.error('Real-Debrid processing error:', error.message);
-        if (error.response) {
-            console.error('Error details:', {
-                status: error.response.status,
-                data: error.response.data
-            });
-        }
         return null;
     }
 }
