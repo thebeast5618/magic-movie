@@ -13,18 +13,6 @@ const config = {
         minSeeds: 1,
         maxSize: 20,
         preferredQuality: ['2160p', '1080p', '720p']
-    },
-    episodeHandling: {
-        preferIndividualEpisodes: true,
-        allowSeasonPacks: true,
-        minSeasonPackSize: 500 * 1024 * 1024, // 500MB minimum for season packs
-        episodeMatchingThreshold: 5, // Minimum score for episode matching
-        checkRealDebridLibrary: true
-    },
-    logging: {
-        debugMode: false,
-        logEpisodeMatching: true,
-        logRealDebridCalls: true
     }
 };
 
