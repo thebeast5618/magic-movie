@@ -82,12 +82,14 @@ async function processWithRealDebrid(stream, apiKey) {
         const files = torrentInfo.data.files;
         let maxFileId = null;
         let maxSize = 0;
+        let selectedFile = null;
 
         files.forEach(file => {
             const isVideo = /\.(mp4|mkv|avi|mov|wmv|flv|webm)$/i.test(file.path);
             if (isVideo && file.bytes > maxSize) {
                 maxSize = file.bytes;
                 maxFileId = file.id;
+                selectedFile = file;
             }
         });
 
@@ -106,6 +108,7 @@ async function processWithRealDebrid(stream, apiKey) {
 
         // Step 5: Wait for the torrent to be processed
         let downloadLink = null;
+        let fileLinks = [];
         attempts = 0;
 
         while (!downloadLink && attempts < 10) {
@@ -114,20 +117,28 @@ async function processWithRealDebrid(stream, apiKey) {
             });
 
             if (statusResponse.data.links?.length > 0) {
-                const unrestrictResponse = await axios.post('https://api.real-debrid.com/rest/1.0/unrestrict/link',
-                    `link=${statusResponse.data.links[0]}`,
-                    { 
-                        headers: { 
-                            'Authorization': `Bearer ${apiKey}`,
-                            'Content-Type': 'application/x-www-form-urlencoded'
-                        } 
-                    }
+                // Get all file links
+                const linkPromises = statusResponse.data.links.map(link =>
+                    axios.post('https://api.real-debrid.com/rest/1.0/unrestrict/link',
+                        `link=${link}`,
+                        { 
+                            headers: { 
+                                'Authorization': `Bearer ${apiKey}`,
+                                'Content-Type': 'application/x-www-form-urlencoded'
+                            } 
+                        }
+                    )
                 );
 
-                if (unrestrictResponse.data.download) {
-                    downloadLink = unrestrictResponse.data.download;
-                    break;
-                }
+                const linkResponses = await Promise.all(linkPromises);
+                fileLinks = linkResponses.map(response => ({
+                    download: response.data.download,
+                    filename: response.data.filename
+                }));
+
+                // Set the main download link to the largest file
+                downloadLink = fileLinks[0].download;
+                break;
             }
 
             attempts++;
@@ -147,7 +158,13 @@ async function processWithRealDebrid(stream, apiKey) {
                     notWebReady: false
                 },
                 qualityScore: qualityScore,
-                size: maxSize
+                size: maxSize,
+                // Add file list information for season packs
+                fileList: files.map((file, index) => ({
+                    path: file.path,
+                    url: fileLinks[index]?.download || null,
+                    size: file.bytes
+                }))
             };
         }
 
